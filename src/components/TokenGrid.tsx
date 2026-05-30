@@ -1,8 +1,20 @@
 'use client';
 
 import { useAccount, useBalance } from 'wagmi';
-import { baseTokens } from '@/config';
 import { useSwapStore } from '@/lib/store';
+import { scanWalletTokens } from '@/lib/dex';
+import { useState, useEffect } from 'react';
+
+interface TokenInfo {
+  address: string;
+  symbol: string;
+  name: string;
+  decimals: number;
+  balance: string;
+  balanceUsd: number;
+  hasLiquidity: boolean;
+  logoURI?: string;
+}
 
 interface TokenCardProps {
   address: string;
@@ -17,6 +29,15 @@ interface TokenCardProps {
 function TokenCard({ address, symbol, name, logoURI, balance, balanceUsd, hasLiquidity }: TokenCardProps) {
   const { selectedTokens, toggleToken } = useSwapStore();
   const isSelected = selectedTokens.has(address);
+
+  // Generate placeholder logo based on symbol
+  const getInitial = (s: string) => s.slice(0, 2).toUpperCase();
+  const colorHash = (s: string) => {
+    let hash = 0;
+    for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
+    const hue = hash % 360;
+    return `hsl(${hue}, 70%, 50%)`;
+  };
 
   const formatBalance = (bal: string) => {
     try {
@@ -56,11 +77,14 @@ function TokenCard({ address, symbol, name, logoURI, balance, balanceUsd, hasLiq
 
       {/* Token Info */}
       <div className="flex items-center gap-3 mb-3">
-        <div className="w-10 h-10 rounded-full bg-gray-700 flex items-center justify-center overflow-hidden">
+        <div 
+          className="w-10 h-10 rounded-full flex items-center justify-center overflow-hidden"
+          style={{ backgroundColor: colorHash(symbol) }}
+        >
           {logoURI ? (
             <img src={logoURI} alt={symbol} className="w-8 h-8" />
           ) : (
-            <span className="text-lg font-bold">{symbol.slice(0, 2)}</span>
+            <span className="text-lg font-bold text-white">{getInitial(symbol)}</span>
           )}
         </div>
         <div>
@@ -85,27 +109,32 @@ function TokenCard({ address, symbol, name, logoURI, balance, balanceUsd, hasLiq
 export function TokenGrid() {
   const { address, isConnected } = useAccount();
   const { selectAll, deselectAll, selectedTokens } = useSwapStore();
+  const [walletTokens, setWalletTokens] = useState<TokenInfo[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  // Fetch balances for each token
-  const tokensWithBalances = baseTokens.map(token => {
-    const { data } = useBalance({
-      address,
-      token: token.address as `0x${string}`,
-    });
-    
-    return {
-      address: token.address,
-      symbol: token.symbol,
-      name: token.name,
-      logoURI: token.logoURI,
-      decimals: token.decimals,
-      balance: data?.value.toString() || '0',
+  // Scan for tokens using DEX liquidity pools
+  useEffect(() => {
+    if (!isConnected || !address) {
+      setWalletTokens([]);
+      return;
+    }
+
+    const scanTokens = async () => {
+      setLoading(true);
+      try {
+        const tokens = await scanWalletTokens(address);
+        setWalletTokens(tokens);
+      } catch (e) {
+        console.error('Token scan error:', e);
+        setWalletTokens([]);
+      } finally {
+        setLoading(false);
+      }
     };
-  });
 
-  // Filter to tokens with balance
-  const displayTokens = tokensWithBalances.filter(t => t.balance && t.balance !== '0');
-  
+    scanTokens();
+  }, [address, isConnected]);
+
   if (!isConnected) {
     return (
       <div className="text-center py-12">
@@ -114,27 +143,34 @@ export function TokenGrid() {
     );
   }
 
-  if (displayTokens.length === 0) {
+  if (walletTokens.length === 0 && !loading) {
     return (
       <div className="text-center py-12">
         <p className="text-gray-400 mb-4">No tokens found in your wallet</p>
-        <p className="text-sm text-gray-500">Make sure you&apos;re connected to Base</p>
+        <p className="text-sm text-gray-500">Make sure you have tokens with liquidity on Aerodrome or BaseSwap</p>
       </div>
     );
   }
 
-  const selectedCount = selectedTokens.size;
+  // Filter to tokens with balance for display
+  const displayTokens = walletTokens.filter(t => t.balance && t.balance !== '0');
 
   return (
     <div>
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <p className="text-gray-400">
-          {displayTokens.length} tokens found • {selectedCount} selected
+          {displayTokens.length} tokens found • {selectedTokens.size} selected
         </p>
         <div className="flex gap-2">
           <button
-            onClick={selectAll}
+            onClick={() => {
+              walletTokens.forEach(t => {
+                if (t.hasLiquidity && t.balance !== '0') {
+                  selectedTokens.add(t.address);
+                }
+              });
+            }}
             className="text-sm text-[#0052FF] hover:text-[#3377FF] transition-colors"
           >
             Select All
@@ -149,21 +185,31 @@ export function TokenGrid() {
         </div>
       </div>
 
+      {/* Loading State */}
+      {loading && (
+        <div className="text-center py-8">
+          <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#0052FF]"></div>
+          <p className="text-gray-400 mt-2">Scanning DEX pools for your tokens...</p>
+        </div>
+      )}
+
       {/* Token Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {tokensWithBalances.map(token => (
-          <TokenCard
-            key={token.address}
-            address={token.address}
-            symbol={token.symbol}
-            name={token.name}
-            logoURI={token.logoURI}
-            balance={token.balance}
-            balanceUsd={0} // TODO: Fetch from price API
-            hasLiquidity={true} // TODO: Check liquidity
-          />
-        ))}
-      </div>
+      {!loading && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {displayTokens.map(token => (
+            <TokenCard
+              key={token.address}
+              address={token.address}
+              symbol={token.symbol}
+              name={token.name}
+              logoURI={token.logoURI}
+              balance={token.balance}
+              balanceUsd={token.balanceUsd}
+              hasLiquidity={token.hasLiquidity}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
